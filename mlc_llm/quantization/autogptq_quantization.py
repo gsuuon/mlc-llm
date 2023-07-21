@@ -27,8 +27,15 @@ def load_autogptq_params(
 
     from auto_gptq import AutoGPTQForCausalLM
 
-    model = AutoGPTQForCausalLM.from_quantized(model_path).cpu()
+    try:
+        model = AutoGPTQForCausalLM.from_quantized(model_path).cpu()
+    except:
+        model = AutoGPTQForCausalLM.from_quantized(model_path, use_safetensors=True).cpu()
+
     param_dict = model.state_dict()
+    print('param_dict keys')
+    print(list(param_dict.keys()))
+
     for pidx, pname in pidx2pname.items():
         if any(excluded_param in pname for excluded_param in excluded_params):
             continue

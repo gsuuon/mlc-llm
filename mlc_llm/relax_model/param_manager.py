@@ -1,5 +1,6 @@
 import json
 import os
+import glob
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import tvm
@@ -9,6 +10,8 @@ from tvm.relax.expr import Expr, Function, Var
 from tvm.relax.testing import nn
 from tvm.relax.analysis import remove_all_unused
 from tvm.relax.expr_functor import PyExprMutator, mutator
+
+from safetensors import safe_open
 
 from .. import quantization, transform
 from .modules import named_parameters
@@ -453,6 +456,28 @@ class ParamManager:
             else:
                 return torch_param.detach().cpu().numpy()
 
+        def load_torch_params_from_safetensors(safetensors_name: str):
+            print('Reading safetensor')
+            with safe_open(safetensors_name, framework="np", device="cpu") as f:
+                torch_param_names = list(f.keys())
+                for torch_param_name in torch_param_names:
+                    # TODO convert to float32 (check fetch_torch_param)
+                    torch_param = f.get_tensor(torch_param_name)
+
+                    relax_params = self.f_convert_param_bkwd(torch_param_name, torch_param)
+                    if relax_params is not None:
+                        for param_name, param in relax_params:
+                            if param_name not in pname2pidx.keys():
+                                continue
+                            pidx = pname2pidx[param_name]
+                            assert pidx not in cached_relax_params
+                            cached_relax_params[pidx] = tvm.nd.array(param, device_cpu)
+                    else:
+                        assert torch_param_name not in cached_torch_params
+                        cached_torch_params[torch_param_name] = torch_param
+            print('Done with safetensor')
+
+
         def load_torch_params_from_bin(torch_binname: str):
             torch_params = torch.load(
                 os.path.join(self.model_path, torch_binname),
@@ -495,7 +520,16 @@ class ParamManager:
                 ]:
                     if torch_binname in loaded_torch_bins:
                         continue
-                    load_torch_params_from_bin(torch_binname)
+                    
+                    print('--- Handling torch_binname')
+                    print(torch_binname)
+                    if torch_binname.endswith('.safetensors'):
+                        print('safetensor')
+                        load_torch_params_from_safetensors(torch_binname)
+                    else:
+                        print('pickle')
+                        load_torch_params_from_bin(torch_binname)
+
                     loaded_torch_bins.add(torch_binname)
 
             if i not in cached_relax_params:
@@ -864,10 +898,15 @@ def load_torch_pname2binname_map(
             torch_pname2binname = torch_bin_json["weight_map"]
     else:
         # Single weight shard.
-        single_shard_path = os.path.join(model_path, "pytorch_model.bin")
+        safetensors_paths = glob.glob('*.safetensors', root_dir=model_path)
+        if safetensors_paths:
+            single_shard_path = os.path.join(model_path, safetensors_paths[0])
+        else:
+            single_shard_path = os.path.join(model_path, "pytorch_model.bin")
+
         assert os.path.isfile(single_shard_path)
         torch_pname2binname = {
-            torch_pname: "pytorch_model.bin"
+            torch_pname: single_shard_path
             for relax_pname in relax_pnames
             for torch_pname in f_convert_pname_fwd(relax_pname)
         }
